@@ -543,6 +543,17 @@ export class CameraControls extends EventDispatcher {
 		const lastDragPosition = new THREE.Vector2() as _THREE.Vector2;
 		const dollyStart = new THREE.Vector2() as _THREE.Vector2;
 
+		// Gesture discrimination for combined touch actions (e.g. TOUCH_DOLLY_ROTATE).
+		// Accumulates deltas to determine whether the user intends to pinch or drag,
+		// then locks to the dominant gesture until the touch ends.
+		const GESTURE_UNDECIDED = 0;
+		const GESTURE_DOLLY_ZOOM = 1;
+		const GESTURE_SECONDARY = 2; // rotate, truck, offset, or screen-pan
+		let activeGesture = GESTURE_UNDECIDED;
+		let gestureDollyZoomAccum = 0;
+		let gestureDragAccum = 0;
+		const GESTURE_THRESHOLD = 5; // pixels of accumulated movement before locking
+
 		const onPointerDown = ( event: PointerEvent ) => {
 
 			if ( ! this._enabled || ! this._domElement ) return;
@@ -889,6 +900,11 @@ export class CameraControls extends EventDispatcher {
 
 				lastDragPosition.set( x, y );
 
+				// reset gesture discrimination
+				activeGesture = GESTURE_UNDECIDED;
+				gestureDollyZoomAccum = 0;
+				gestureDragAccum = 0;
+
 			}
 
 			this._state = 0;
@@ -1036,12 +1052,56 @@ export class CameraControls extends EventDispatcher {
 
 			lastDragPosition.copy( _v2 );
 
+			// Determine if this is a combined touch action that needs gesture discrimination.
+			const isCombinedAction =
+				( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
+				( this._state & ACTION.TOUCH_ZOOM_ROTATE ) === ACTION.TOUCH_ZOOM_ROTATE ||
+				( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
+				( this._state & ACTION.TOUCH_ZOOM_TRUCK ) === ACTION.TOUCH_ZOOM_TRUCK ||
+				( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
+				( this._state & ACTION.TOUCH_ZOOM_SCREEN_PAN ) === ACTION.TOUCH_ZOOM_SCREEN_PAN ||
+				( this._state & ACTION.TOUCH_DOLLY_OFFSET ) === ACTION.TOUCH_DOLLY_OFFSET ||
+				( this._state & ACTION.TOUCH_ZOOM_OFFSET ) === ACTION.TOUCH_ZOOM_OFFSET;
+
+			// For combined touch actions, compute pinch distance change and accumulate
+			// gesture deltas to determine whether the user intends to pinch or drag.
+			let dollyDelta = 0;
+
+			if ( isCombinedAction ) {
+
+				const dx = _v2.x - this._activePointers[ 1 ].clientX;
+				const dy = _v2.y - this._activePointers[ 1 ].clientY;
+				const distance = Math.sqrt( dx * dx + dy * dy );
+				dollyDelta = dollyStart.y - distance;
+				dollyStart.set( 0, distance );
+
+				if ( activeGesture === GESTURE_UNDECIDED ) {
+
+					gestureDollyZoomAccum += Math.abs( dollyDelta );
+					gestureDragAccum += Math.sqrt( deltaX * deltaX + deltaY * deltaY );
+
+					if ( gestureDollyZoomAccum >= GESTURE_THRESHOLD ) {
+
+						activeGesture = GESTURE_DOLLY_ZOOM;
+
+					} else if ( gestureDragAccum >= GESTURE_THRESHOLD ) {
+
+						activeGesture = GESTURE_SECONDARY;
+
+					}
+
+				}
+
+			}
+
 			// rotate
 			if (
 				( this._state & ACTION.ROTATE ) === ACTION.ROTATE ||
 				( this._state & ACTION.TOUCH_ROTATE ) === ACTION.TOUCH_ROTATE ||
-				( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
-				( this._state & ACTION.TOUCH_ZOOM_ROTATE ) === ACTION.TOUCH_ZOOM_ROTATE
+				( ! isCombinedAction || activeGesture === GESTURE_SECONDARY ) && (
+					( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
+					( this._state & ACTION.TOUCH_ZOOM_ROTATE ) === ACTION.TOUCH_ZOOM_ROTATE
+				)
 			) {
 
 				this._rotateInternal( deltaX, deltaY );
@@ -1073,31 +1133,53 @@ export class CameraControls extends EventDispatcher {
 
 			}
 
-			// touch dolly or zoom
+			// touch dolly or zoom (standalone, no gesture discrimination needed)
 			if (
 				( this._state & ACTION.TOUCH_DOLLY ) === ACTION.TOUCH_DOLLY ||
-				( this._state & ACTION.TOUCH_ZOOM ) === ACTION.TOUCH_ZOOM ||
-				( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
-				( this._state & ACTION.TOUCH_ZOOM_TRUCK ) === ACTION.TOUCH_ZOOM_TRUCK ||
-				( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
-				( this._state & ACTION.TOUCH_ZOOM_SCREEN_PAN ) === ACTION.TOUCH_ZOOM_SCREEN_PAN ||
-				( this._state & ACTION.TOUCH_DOLLY_OFFSET ) === ACTION.TOUCH_DOLLY_OFFSET ||
-				( this._state & ACTION.TOUCH_ZOOM_OFFSET ) === ACTION.TOUCH_ZOOM_OFFSET ||
-				( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
-				( this._state & ACTION.TOUCH_ZOOM_ROTATE ) === ACTION.TOUCH_ZOOM_ROTATE
+				( this._state & ACTION.TOUCH_ZOOM ) === ACTION.TOUCH_ZOOM
 			) {
 
 				const dx = _v2.x - this._activePointers[ 1 ].clientX;
 				const dy = _v2.y - this._activePointers[ 1 ].clientY;
 				const distance = Math.sqrt( dx * dx + dy * dy );
-				const dollyDelta = dollyStart.y - distance;
+				const standaloneDollyDelta = dollyStart.y - distance;
 				dollyStart.set( 0, distance );
 
 				const dollyX = this.dollyToCursor ? ( lastDragPosition.x - this._elementRect.x ) / this._elementRect.width  *   2 - 1 : 0;
 				const dollyY = this.dollyToCursor ? ( lastDragPosition.y - this._elementRect.y ) / this._elementRect.height * - 2 + 1 : 0;
 
+				if ( ( this._state & ACTION.TOUCH_DOLLY ) === ACTION.TOUCH_DOLLY ) {
+
+					this._dollyInternal( standaloneDollyDelta * TOUCH_DOLLY_FACTOR, dollyX, dollyY );
+					this._isUserControllingDolly = true;
+
+				} else {
+
+					this._zoomInternal( standaloneDollyDelta * TOUCH_DOLLY_FACTOR, dollyX, dollyY );
+					this._isUserControllingZoom = true;
+
+				}
+
+			}
+
+			// touch dolly or zoom (combined action, with gesture discrimination)
+			if (
+				( ! isCombinedAction || activeGesture === GESTURE_DOLLY_ZOOM ) && (
+					( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
+					( this._state & ACTION.TOUCH_ZOOM_TRUCK ) === ACTION.TOUCH_ZOOM_TRUCK ||
+					( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
+					( this._state & ACTION.TOUCH_ZOOM_SCREEN_PAN ) === ACTION.TOUCH_ZOOM_SCREEN_PAN ||
+					( this._state & ACTION.TOUCH_DOLLY_OFFSET ) === ACTION.TOUCH_DOLLY_OFFSET ||
+					( this._state & ACTION.TOUCH_ZOOM_OFFSET ) === ACTION.TOUCH_ZOOM_OFFSET ||
+					( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
+					( this._state & ACTION.TOUCH_ZOOM_ROTATE ) === ACTION.TOUCH_ZOOM_ROTATE
+				)
+			) {
+
+				const dollyX = this.dollyToCursor ? ( lastDragPosition.x - this._elementRect.x ) / this._elementRect.width  *   2 - 1 : 0;
+				const dollyY = this.dollyToCursor ? ( lastDragPosition.y - this._elementRect.y ) / this._elementRect.height * - 2 + 1 : 0;
+
 				if (
-					( this._state & ACTION.TOUCH_DOLLY ) === ACTION.TOUCH_DOLLY ||
 					( this._state & ACTION.TOUCH_DOLLY_ROTATE ) === ACTION.TOUCH_DOLLY_ROTATE ||
 					( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
 					( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
@@ -1120,8 +1202,10 @@ export class CameraControls extends EventDispatcher {
 			if (
 				( this._state & ACTION.TRUCK ) === ACTION.TRUCK ||
 				( this._state & ACTION.TOUCH_TRUCK ) === ACTION.TOUCH_TRUCK ||
-				( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
-				( this._state & ACTION.TOUCH_ZOOM_TRUCK ) === ACTION.TOUCH_ZOOM_TRUCK
+				( ! isCombinedAction || activeGesture === GESTURE_SECONDARY ) && (
+					( this._state & ACTION.TOUCH_DOLLY_TRUCK ) === ACTION.TOUCH_DOLLY_TRUCK ||
+					( this._state & ACTION.TOUCH_ZOOM_TRUCK ) === ACTION.TOUCH_ZOOM_TRUCK
+				)
 			) {
 
 				this._truckInternal( deltaX, deltaY, false, false );
@@ -1133,8 +1217,10 @@ export class CameraControls extends EventDispatcher {
 			if (
 				( this._state & ACTION.SCREEN_PAN ) === ACTION.SCREEN_PAN ||
 				( this._state & ACTION.TOUCH_SCREEN_PAN ) === ACTION.TOUCH_SCREEN_PAN ||
-				( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
-				( this._state & ACTION.TOUCH_ZOOM_SCREEN_PAN ) === ACTION.TOUCH_ZOOM_SCREEN_PAN
+				( ! isCombinedAction || activeGesture === GESTURE_SECONDARY ) && (
+					( this._state & ACTION.TOUCH_DOLLY_SCREEN_PAN ) === ACTION.TOUCH_DOLLY_SCREEN_PAN ||
+					( this._state & ACTION.TOUCH_ZOOM_SCREEN_PAN ) === ACTION.TOUCH_ZOOM_SCREEN_PAN
+				)
 			) {
 
 				this._truckInternal( deltaX, deltaY, false, true );
@@ -1146,8 +1232,10 @@ export class CameraControls extends EventDispatcher {
 			if (
 				( this._state & ACTION.OFFSET ) === ACTION.OFFSET ||
 				( this._state & ACTION.TOUCH_OFFSET ) === ACTION.TOUCH_OFFSET ||
-				( this._state & ACTION.TOUCH_DOLLY_OFFSET ) === ACTION.TOUCH_DOLLY_OFFSET ||
-				( this._state & ACTION.TOUCH_ZOOM_OFFSET ) === ACTION.TOUCH_ZOOM_OFFSET
+				( ! isCombinedAction || activeGesture === GESTURE_SECONDARY ) && (
+					( this._state & ACTION.TOUCH_DOLLY_OFFSET ) === ACTION.TOUCH_DOLLY_OFFSET ||
+					( this._state & ACTION.TOUCH_ZOOM_OFFSET ) === ACTION.TOUCH_ZOOM_OFFSET
+				)
 			) {
 
 				this._truckInternal( deltaX, deltaY, true, false );
@@ -1165,6 +1253,11 @@ export class CameraControls extends EventDispatcher {
 			lastDragPosition.copy( _v2 );
 
 			this._dragNeedsUpdate = false;
+
+			// reset gesture discrimination when touch ends or finger count changes
+			activeGesture = GESTURE_UNDECIDED;
+			gestureDollyZoomAccum = 0;
+			gestureDragAccum = 0;
 
 			if (
 				this._activePointers.length === 0 ||
